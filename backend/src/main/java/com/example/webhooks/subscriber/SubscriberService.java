@@ -1,5 +1,6 @@
 package com.example.webhooks.subscriber;
 
+import com.example.webhooks.breaker.SubscriberBreakers;
 import com.example.webhooks.subscriber.SubscriberDtos.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -15,8 +16,12 @@ import java.util.UUID;
 public class SubscriberService {
     private static final SecureRandom RANDOM = new SecureRandom();
     private final SubscriberRepository repo;
+    private final SubscriberBreakers breakers;
 
-    public SubscriberService(SubscriberRepository repo) { this.repo = repo; }
+    public SubscriberService(SubscriberRepository repo, SubscriberBreakers breakers) {
+        this.repo = repo;
+        this.breakers = breakers;
+    }
 
     @Transactional
     public CreatedView create(CreateRequest req) {
@@ -29,11 +34,11 @@ public class SubscriberService {
 
     @Transactional(readOnly = true)
     public List<View> list() {
-        return repo.findAll().stream().map(View::of).toList();
+        return repo.findAll().stream().map(this::view).toList();
     }
 
     @Transactional(readOnly = true)
-    public View get(UUID id) { return View.of(find(id)); }
+    public View get(UUID id) { return view(find(id)); }
 
     @Transactional
     public View update(UUID id, UpdateRequest req) {
@@ -42,12 +47,14 @@ public class SubscriberService {
         if (req.url() != null) s.setUrl(req.url());
         if (req.rateLimitPerMin() != null) s.setRateLimitPerMin(req.rateLimitPerMin());
         if (req.active() != null) s.setActive(req.active());
-        return View.of(s);
+        return view(s);
     }
 
     /** Soft delete: deliveries keep a valid foreign key. */
     @Transactional
     public void deactivate(UUID id) { find(id).setActive(false); }
+
+    private View view(Subscriber s) { return View.of(s, breakers.snapshot(s.getId())); }
 
     private Subscriber find(UUID id) {
         return repo.findById(id).orElseThrow(() ->

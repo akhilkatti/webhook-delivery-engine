@@ -1,0 +1,1 @@
+{ "name": "Down Server", "url": "http://localhost:8080/mock/down?failRate=1&hangRate=0", "rateLimitPerMin": 600 }
