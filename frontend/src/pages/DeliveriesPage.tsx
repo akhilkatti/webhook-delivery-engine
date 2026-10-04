@@ -11,6 +11,8 @@ import { useReplay } from '../hooks/useReplay'
 import { StatusBadge } from '../components/StatusBadge'
 import { FilterBar } from '../components/FilterBar'
 import { DeliveryDrawer } from '../components/DeliveryDrawer'
+import { useDeliveryStream } from '../hooks/useDeliveryStream'
+import { LiveIndicator } from '../components/LiveIndicator'
 
 const route = getRouteApi('/deliveries')   // typed access to this route's search params, without a circular import
 const ROW_HEIGHT = 40
@@ -18,6 +20,7 @@ const columnHelper = createColumnHelper<Delivery>()
 
 export function DeliveriesPage() {
     const filters = route.useSearch()
+    const { status: streamStatus, newCount, showNew } = useDeliveryStream(filters)
     const navigate = route.useNavigate()
     const [selectedId, setSelectedId] = useState<string | null>(null)
     const replay = useReplay()
@@ -126,10 +129,23 @@ export function DeliveriesPage() {
             <FilterBar filters={filters} onChange={updateFilters} onClear={clearFilters} />
 
             <div className="grid-status">
-                {isPending ? 'Loading…' : `${rows.length.toLocaleString()} loaded${hasNextPage ? ' (scroll for more)' : ''}`}
-                {isFetchingNextPage && ' · loading more…'}
+  <span>
+    {isPending ? 'Loading…' : `${rows.length.toLocaleString()} loaded${hasNextPage ? ' (scroll for more)' : ''}`}
+      {isFetchingNextPage && ' · loading more…'}
+  </span>
+                <span className="grid-status-right">
+    {newCount > 0 && (
+        <button
+            type="button"
+            className="new-pill"
+            onClick={() => { showNew(); scrollRef.current?.scrollTo({ top: 0 }) }}
+        >
+            {newCount} new update{newCount === 1 ? '' : 's'} · click to refresh
+        </button>
+    )}
+                    <LiveIndicator status={streamStatus} />
+  </span>
             </div>
-
             {error ? (
                 <p className="error">
                     Failed to load deliveries: {error.message}{' '}
