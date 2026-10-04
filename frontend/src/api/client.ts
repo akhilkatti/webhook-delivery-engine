@@ -58,3 +58,8 @@ export const createSubscriber = (body: { name: string; url: string; rateLimitPer
     request<CreatedSubscriber>('/api/subscribers', { method: 'POST', body: JSON.stringify(body) })
 
 export const fetchStats = (hours = 24) => request<Stats>(`/api/stats?hours=${hours}`)
+
+export const updateSubscriber = (
+    id: string,
+    body: { name?: string; url?: string; rateLimitPerMin?: number; active?: boolean },
+) => request<Subscriber>(`/api/subscribers/${id}`, { method: 'PUT', body: JSON.stringify(body) })
