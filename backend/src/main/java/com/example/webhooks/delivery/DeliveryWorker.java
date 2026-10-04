@@ -3,6 +3,8 @@ package com.example.webhooks.delivery;
 import com.example.webhooks.event.Event;
 import com.example.webhooks.event.EventRepository;
 import com.example.webhooks.queue.DeliveryQueue;
+import com.example.webhooks.ratelimit.RateLimiter;
+import com.example.webhooks.security.HmacSigner;
 import com.example.webhooks.subscriber.Subscriber;
 import com.example.webhooks.subscriber.SubscriberRepository;
 import org.slf4j.Logger;
@@ -18,6 +20,9 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 @Component
 public class DeliveryWorker {
@@ -28,17 +33,22 @@ public class DeliveryWorker {
     private final SubscriberRepository subscribers;
     private final DeliveryQueue queue;
     private final RetryPolicy retry;
+    private final HmacSigner signer;
+    private final RateLimiter limiter;
     private final HttpClient http;
     private final long timeoutMs;
 
     public DeliveryWorker(DeliveryRepository deliveries, EventRepository events,
                           SubscriberRepository subscribers, DeliveryQueue queue, RetryPolicy retry,
+                          HmacSigner signer, RateLimiter limiter,
                           @Value("${app.delivery.request-timeout-ms:5000}") long timeoutMs) {
         this.deliveries = deliveries;
         this.events = events;
         this.subscribers = subscribers;
         this.queue = queue;
         this.retry = retry;
+        this.signer = signer;
+        this.limiter = limiter;
         this.timeoutMs = timeoutMs;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(timeoutMs))
@@ -63,6 +73,21 @@ public class DeliveryWorker {
             return;
         }
 
+        // Rate limit BEFORE marking IN_FLIGHT: being throttled is not a failed attempt.
+        long waitMs = acquireSlot(sub);
+        if (waitMs > 0) {
+            Instant dueAt = Instant.now().plusMillis(waitMs + ThreadLocalRandom.current().nextLong(500));
+            d.setNextAttemptAt(dueAt);                 // status and attempt_count stay untouched
+            deliveries.save(d);
+            try {
+                queue.enqueue(d.getId(), dueAt);
+            } catch (Exception e) {
+                log.warn("enqueue failed for {}, recovery job will pick it up: {}", d.getId(), e.getMessage());
+            }
+            log.info("delivery {} rate limited ({}/min), retry in {} ms", d.getId(), sub.getRateLimitPerMin(), waitMs);
+            return;
+        }
+
         d.setStatus(DeliveryStatus.IN_FLIGHT);
         d.setAttemptCount(d.getAttemptCount() + 1);
         deliveries.save(d);
@@ -71,12 +96,15 @@ public class DeliveryWorker {
         Integer httpStatus = null;
         String error = null;
         try {
+            byte[] body = event.getPayload().getBytes(UTF_8);          // sign and send these exact bytes
+            long timestamp = Instant.now().getEpochSecond();           // fresh timestamp on every attempt
             HttpRequest req = HttpRequest.newBuilder(URI.create(sub.getUrl()))
                     .timeout(Duration.ofMillis(timeoutMs))
                     .header("Content-Type", "application/json")
                     .header("X-Webhook-Id", d.getId().toString())
                     .header("X-Webhook-Event", event.getType())
-                    .POST(BodyPublishers.ofString(event.getPayload()))
+                    .header("X-Webhook-Signature", signer.header(sub.getSecret(), timestamp, body))
+                    .POST(BodyPublishers.ofByteArray(body))
                     .build();
             httpStatus = http.send(req, BodyHandlers.discarding()).statusCode();
         } catch (InterruptedException ie) {
@@ -124,13 +152,23 @@ public class DeliveryWorker {
         d.setStatus(DeliveryStatus.RETRYING);
         d.setNextAttemptAt(dueAt);
         d.setLastError(reason);
-        deliveries.save(d);                       // DB first (source of truth)...
+        deliveries.save(d);
         try {
-            queue.enqueue(d.getId(), dueAt);      // ...then Redis. If this fails, recovery re-enqueues it.
+            queue.enqueue(d.getId(), dueAt);
         } catch (Exception e) {
             log.warn("enqueue failed for {}, recovery job will pick it up: {}", d.getId(), e.getMessage());
         }
         log.info("delivery {} FAILED ({}), attempt {}/{}, retry in {} ms",
                 d.getId(), reason, d.getAttemptCount(), retry.maxAttempts(), delay.toMillis());
+    }
+
+    /** Fails open: if Redis hiccups, deliver rather than strand the delivery. Logged loudly. */
+    private long acquireSlot(Subscriber sub) {
+        try {
+            return limiter.tryAcquire(sub.getId(), sub.getRateLimitPerMin());
+        } catch (Exception e) {
+            log.warn("rate limiter unavailable, failing open: {}", e.getMessage());
+            return 0;
+        }
     }
 }
