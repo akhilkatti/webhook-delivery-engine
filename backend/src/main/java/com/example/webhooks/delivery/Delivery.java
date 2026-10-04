@@ -3,6 +3,11 @@ package com.example.webhooks.delivery;
 import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.UUID;
+import com.example.webhooks.stream.DeliveryChanged;
+import org.springframework.data.domain.AfterDomainEventPublication;
+import org.springframework.data.domain.DomainEvents;
+import java.util.Collection;
+import java.util.List;
 
 @Entity
 @Table(name = "deliveries")
@@ -32,6 +37,15 @@ public class Delivery {
 
     @PreUpdate
     void touch() { this.updatedAt = Instant.now(); }
+    /** Spring Data calls this on every repository save(). */
+    @DomainEvents
+    public Collection<Object> domainEvents() {
+        return List.of(new DeliveryChanged(id, subscriberId, status.name(), attemptCount,
+                lastHttpStatus, lastError, latencyMs, Instant.now()));
+    }
+
+    @AfterDomainEventPublication
+    public void clearDomainEvents() { /* nothing to clear: events are built on demand */ }
 
     public UUID getId() { return id; }
     public UUID getEventId() { return eventId; }
