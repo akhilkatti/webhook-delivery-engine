@@ -71,6 +71,21 @@ public class DeliveryPoller {
         }
     }
 
+    /**
+     * Safety net: rows that are due but not in Redis (Redis was down when we enqueued,
+     * or the ZSET was lost) get re-enqueued. Postgres is the source of truth.
+     */
+    @Scheduled(fixedDelayString = "${app.queue.recovery-interval-ms:60000}")
+    public void recoverOrphans() {
+        Instant cutoff = Instant.now().minusSeconds(60);   // grace period so we don't race live workers
+        var orphans = deliveries.findTop100ByStatusInAndNextAttemptAtBefore(
+                List.of(DeliveryStatus.PENDING, DeliveryStatus.RETRYING), cutoff);
+        for (Delivery d : orphans) {
+            queue.enqueueIfAbsent(d.getId(), Instant.now());
+            log.warn("recovery re-enqueued delivery {} ({})", d.getId(), d.getStatus());
+        }
+    }
+
     @PreDestroy
     void shutdown() { executor.shutdown(); }
 }

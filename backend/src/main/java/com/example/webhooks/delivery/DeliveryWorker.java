@@ -2,6 +2,7 @@ package com.example.webhooks.delivery;
 
 import com.example.webhooks.event.Event;
 import com.example.webhooks.event.EventRepository;
+import com.example.webhooks.queue.DeliveryQueue;
 import com.example.webhooks.subscriber.Subscriber;
 import com.example.webhooks.subscriber.SubscriberRepository;
 import org.slf4j.Logger;
@@ -25,15 +26,19 @@ public class DeliveryWorker {
     private final DeliveryRepository deliveries;
     private final EventRepository events;
     private final SubscriberRepository subscribers;
+    private final DeliveryQueue queue;
+    private final RetryPolicy retry;
     private final HttpClient http;
     private final long timeoutMs;
 
     public DeliveryWorker(DeliveryRepository deliveries, EventRepository events,
-                          SubscriberRepository subscribers,
+                          SubscriberRepository subscribers, DeliveryQueue queue, RetryPolicy retry,
                           @Value("${app.delivery.request-timeout-ms:5000}") long timeoutMs) {
         this.deliveries = deliveries;
         this.events = events;
         this.subscribers = subscribers;
+        this.queue = queue;
+        this.retry = retry;
         this.timeoutMs = timeoutMs;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(timeoutMs))
@@ -52,12 +57,12 @@ public class DeliveryWorker {
         Event event = events.findById(d.getEventId()).orElse(null);
         if (sub == null || event == null || !sub.isActive()) {
             d.setStatus(DeliveryStatus.DLQ);
+            d.setNextAttemptAt(null);
             d.setLastError("subscriber inactive or missing data");
             deliveries.save(d);
             return;
         }
 
-        // Mark in-flight BEFORE the network call; no DB transaction is held during the HTTP request.
         d.setStatus(DeliveryStatus.IN_FLIGHT);
         d.setAttemptCount(d.getAttemptCount() + 1);
         deliveries.save(d);
@@ -84,18 +89,48 @@ public class DeliveryWorker {
 
         d.setLatencyMs(latency);
         d.setLastHttpStatus(httpStatus);
+
         if (httpStatus != null && httpStatus >= 200 && httpStatus < 300) {
             d.setStatus(DeliveryStatus.SUCCESS);
             d.setLastError(null);
             d.setNextAttemptAt(null);
+            deliveries.save(d);
             log.info("delivery {} SUCCESS ({} ms, attempt {})", d.getId(), latency, d.getAttemptCount());
-        } else {
-            // Block 4 will replace this with backoff + re-enqueue + DLQ.
-            d.setStatus(DeliveryStatus.RETRYING);
-            d.setLastError(error != null ? error : "HTTP " + httpStatus);
-            d.setNextAttemptAt(Instant.now());
-            log.info("delivery {} FAILED ({}), attempt {}", d.getId(), d.getLastError(), d.getAttemptCount());
+            return;
         }
-        deliveries.save(d);
+
+        String reason = error != null ? error : "HTTP " + httpStatus;
+
+        if (!retry.isRetryable(httpStatus, error)) {
+            d.setStatus(DeliveryStatus.DLQ);
+            d.setNextAttemptAt(null);
+            d.setLastError("non-retryable: " + reason);
+            deliveries.save(d);
+            log.warn("delivery {} -> DLQ (non-retryable: {})", d.getId(), reason);
+            return;
+        }
+
+        if (d.getAttemptCount() >= retry.maxAttempts()) {
+            d.setStatus(DeliveryStatus.DLQ);
+            d.setNextAttemptAt(null);
+            d.setLastError("max attempts reached: " + reason);
+            deliveries.save(d);
+            log.warn("delivery {} -> DLQ after {} attempts ({})", d.getId(), d.getAttemptCount(), reason);
+            return;
+        }
+
+        Duration delay = retry.nextDelay(d.getAttemptCount());
+        Instant dueAt = Instant.now().plus(delay);
+        d.setStatus(DeliveryStatus.RETRYING);
+        d.setNextAttemptAt(dueAt);
+        d.setLastError(reason);
+        deliveries.save(d);                       // DB first (source of truth)...
+        try {
+            queue.enqueue(d.getId(), dueAt);      // ...then Redis. If this fails, recovery re-enqueues it.
+        } catch (Exception e) {
+            log.warn("enqueue failed for {}, recovery job will pick it up: {}", d.getId(), e.getMessage());
+        }
+        log.info("delivery {} FAILED ({}), attempt {}/{}, retry in {} ms",
+                d.getId(), reason, d.getAttemptCount(), retry.maxAttempts(), delay.toMillis());
     }
 }

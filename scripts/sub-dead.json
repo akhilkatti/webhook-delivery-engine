@@ -1,0 +1,1 @@
+{ "name": "Always Failing", "url": "http://localhost:8080/mock/dead?failRate=1", "rateLimitPerMin": 60 }

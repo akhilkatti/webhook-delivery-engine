@@ -51,4 +51,9 @@ public class DeliveryQueue {
         if (raw == null) return List.of();
         return raw.stream().map(o -> UUID.fromString(o.toString())).toList();
     }
+
+    /** Adds only if the ID isn't already queued, so it never overwrites an existing due time. */
+    public void enqueueIfAbsent(UUID deliveryId, Instant dueAt) {
+        redis.opsForZSet().addIfAbsent(KEY, deliveryId.toString(), dueAt.toEpochMilli());
+    }
 }
