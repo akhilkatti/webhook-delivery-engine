@@ -1,0 +1,15 @@
+:root { font-family: system-ui, sans-serif; color: #1a1d23; background: #f6f7f9; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.app nav { display: flex; gap: 20px; align-items: center; padding: 12px 24px; background: #fff; border-bottom: 1px solid #e3e6ea; }
+.app nav a { color: #555; text-decoration: none; padding: 4px 0; }
+.app nav a.active { color: #111; border-bottom: 2px solid #4f46e5; }
+main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.card { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+.card span { color: #666; font-size: 13px; }
+.card strong { font-size: 28px; }
+table.simple { width: 100%; border-collapse: collapse; background: #fff; }
+table.simple th, table.simple td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.error { color: #b91c1c; }
